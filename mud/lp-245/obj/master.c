@@ -441,6 +441,12 @@ void inaugurate_master (int arg)
   if (find_call_out("wiz_decay") < 0)
     call_out("wiz_decay", 3600);
 
+  // Let the lib negotiate telnet options.
+  set_driver_hook(
+    H_TELNET_NEG,
+    "telopt_negotiate"
+  );
+
   set_driver_hook(
         H_MOVE_OBJECT0,
         unbound_lambda( ({'item, 'dest}),
