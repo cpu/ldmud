@@ -1,6 +1,7 @@
 #include "input_to.h"
 #include "log.h"
 #include "living.h"
+#include "telnet.h"
 
 #define WIZ 1
 #define ARCH 0
@@ -101,7 +102,7 @@ void tls_init(int handshake_result) {
 /* logon() is called when the players logges on. */
 
 static int logon() {
-    binary_message( ({ IAC, WILL, TELOPT_GMCP }), 3);
+    binary_message( ({ IAC, WILL, TELOPT_STARTTLS }), 3);
 
     time_to_save = 500;
     /* enable_commands(); */
