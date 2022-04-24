@@ -5,5 +5,5 @@
 #endif
 
 public void telopt_negotiate(int action, int option, int *optdata) {
-  DEBUG(sprintf("action = %d option = %d optdata = %Q", action, option, optdata);
+  DEBUG(sprintf("action = %d option = %d optdata = %Q", action, option, optdata));
 }

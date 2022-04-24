@@ -5,6 +5,8 @@
 #define WIZ 1
 #define ARCH 0
 
+virtual inherit __PATH__(0)"telopt.c";
+
 static object myself;                /* Ourselfs. */
 string title;                /* Our official title. Wiz's can change it. */
 string password;        /* This players crypted password. */
@@ -99,6 +101,8 @@ void tls_init(int handshake_result) {
 /* logon() is called when the players logges on. */
 
 static int logon() {
+    binary_message( ({ IAC, WILL, TELOPT_GMCP }), 3);
+
     time_to_save = 500;
     /* enable_commands(); */
     write("Lars says: Let's get a body for your character ...\n");
