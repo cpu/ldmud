@@ -103,7 +103,7 @@ void tls_init(int handshake_result) {
 
 static int logon() {
     binary_message( ({ IAC, WILL, TELOPT_STARTTLS }), 3);
-    binary_message( ({ IAC, WILL, TELOPT_AUTHENTICATION }), 3);
+    binary_message( ({ IAC, DO, TELOPT_AUTHENTICATION }), 3);
 
     time_to_save = 500;
     /* enable_commands(); */
