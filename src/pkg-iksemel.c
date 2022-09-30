@@ -405,13 +405,13 @@ generate_xml_node(vector_t *vnode, iks *parent)
     return node;
 }
 
-#if defined(ALLOCATOR_WRAPPERS)
 void
 pkg_iksemel_init()
 {
+#if defined(ALLOCATOR_WRAPPERS)
     iks_set_mem_funcs(iksemel_alloc, iksemel_free);
-}
 #endif /* ALLOCATOR_WRAPPERS */
+}
 
 /*=========================================================================*/
 
