@@ -11328,25 +11328,25 @@ ldmud_mixed_new (PyTypeObject *type, PyObject *args, PyObject *kwds)
             return NULL;
         }
 
-        return PyObject_CallOneArg((PyObject *)&ldmud_integer_type, value);
+        return PyObject_CallFunctionObjArgs((PyObject *)&ldmud_integer_type, value, NULL);
     }
 
     if (PyBool_Check(value))
     {
         PyObject *num = PyLong_FromLong(value == Py_True ? 1 : 0);
-        PyObject *result = PyObject_CallOneArg((PyObject *)&ldmud_integer_type, num);
+        PyObject *result = PyObject_CallFunctionObjArgs((PyObject *)&ldmud_integer_type, num, NULL);
         Py_DECREF(num);
         return result;
     }
 
     if (PyFloat_Check(value))
-        return PyObject_CallOneArg((PyObject *)&ldmud_float_type, value);
+        return PyObject_CallFunctionObjArgs((PyObject *)&ldmud_float_type, value, NULL);
 
     if (PyBytes_Check(value))
-        return PyObject_CallOneArg((PyObject *)&ldmud_bytes_type, value);
+        return PyObject_CallFunctionObjArgs((PyObject *)&ldmud_bytes_type, value, NULL);
 
     if (PyUnicode_Check(value))
-        return PyObject_CallOneArg((PyObject *)&ldmud_string_type, value);
+        return PyObject_CallFunctionObjArgs((PyObject *)&ldmud_string_type, value, NULL);
 
     PyErr_Format(PyExc_TypeError, "unsupported type '%.200s'", valuetype->tp_name);
     return NULL;
