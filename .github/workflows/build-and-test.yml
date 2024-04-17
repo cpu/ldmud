@@ -67,3 +67,55 @@ jobs:
               with:
                 name: coverage ${{ matrix.cc }}
                 path: test/html
+    build-osx:
+        runs-on: ${{ matrix.os }}
+        strategy:
+            matrix:
+                os: [macos-13, macos-14]
+                cc: [gcc-13, clang]
+        # TODO(@cpu): remove continue-on-error
+        continue-on-error: true
+        steps:
+            - name: Install dependencies
+              run: brew install automake libiconv bison libgcrypt pcre json-c
+            - name: System bison version
+              run: bison --version
+            - name: Brew bison version
+              run: PATH="/usr/local/opt/bison/bin:$PATH" bison --version
+            - name: Checkout sources
+              uses: actions/checkout@v3
+            - name: Generate build files
+              working-directory: src
+              run: ./autogen.sh
+            - name: Configure build
+              working-directory: src
+              shell: sh
+              run: >
+                LDFLAGS="-L/usr/local/opt/libgcrypt/lib -L/usr/local/opt/bison/lib -L/usr/local/opt/libiconv/lib"
+                CPPFLAGS="-I/usr/local/opt/libiconv/include"
+                PATH="/usr/local/opt/bison/bin:$PATH"
+                ./configure \
+                  --with-iconv=/usr/local/opt/libiconv/ \
+                  --enable-use-ipv6 \
+                  --enable-use-mccp \
+                  --enable-use-json \
+                  --enable-use-pcre \
+                  --enable-malloc-trace \
+                  --enable-malloc-lpc-trace \
+                  --enable-dynamic-costs \
+                  --enable-eval-cost-trace \
+                  --enable-trace-code \
+                  --enable-swap-efun \
+                  CC=${{ matrix.cc }}
+            - name: Build driver
+              working-directory: src
+              run: >
+                LDFLAGS="-L/usr/local/opt/libgcrypt/lib -L/usr/local/opt/bison/lib -L/usr/local/opt/libiconv/lib"
+                CPPFLAGS="-I/usr/local/opt/libiconv/include"
+                PATH="/usr/local/opt/bison/bin:$PATH"
+                make
+            - name: Run tests
+              working-directory: test
+              shell: sh
+              run: >
+                ./run.sh
