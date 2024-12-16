@@ -6313,6 +6313,31 @@ ldmud_array_init (ldmud_array_t *self, PyObject *args, PyObject *kwds)
 } /* ldmud_array_init() */
 
 /*-------------------------------------------------------------------------*/
+static Py_hash_t
+ldmud_array_hash (ldmud_array_t *val)
+
+/* Return a hash of this array.
+ */
+
+{
+    return _Py_HashPointer(val->lpc_array);
+} /* ldmud_array_hash() */
+
+/*-------------------------------------------------------------------------*/
+static PyObject*
+ldmud_array_richcompare (ldmud_array_t *self, PyObject *other, int op)
+
+/* Compare <self> to <other> with the compare operation <op>.
+ */
+
+{
+    if (!ldmud_array_check(other))
+        Py_RETURN_NOTIMPLEMENTED;
+
+    return pointer_richcompare(self->lpc_array, ((ldmud_array_t*)other)->lpc_array, op);
+} /* ldmud_array_richcompare() */
+
+/*-------------------------------------------------------------------------*/
 static Py_ssize_t
 ldmud_array_length (ldmud_array_t *val)
 
@@ -6757,7 +6782,7 @@ static ldmud_lpctype_t ldmud_array_type =
     0,                                  /* tp_as_number */
     &ldmud_array_as_sequence,           /* tp_as_sequence */
     &ldmud_array_as_mapping,            /* tp_as_mapping */
-    0,                                  /* tp_hash  */
+    (hashfunc)ldmud_array_hash,         /* tp_hash  */
     0,                                  /* tp_call */
     0,                                  /* tp_str */
     0,                                  /* tp_getattro */
@@ -6767,7 +6792,7 @@ static ldmud_lpctype_t ldmud_array_type =
     "LPC array",                        /* tp_doc */
     0,                                  /* tp_traverse */
     0,                                  /* tp_clear */
-    0,                                  /* tp_richcompare */
+    (richcmpfunc)ldmud_array_richcompare, /* tp_richcompare */
     0,                                  /* tp_weaklistoffset */
     0,                                  /* tp_iter */
     0,                                  /* tp_iternext */
@@ -7479,6 +7504,31 @@ ldmud_mapping_init (ldmud_mapping_t *self, PyObject *args, PyObject *kwds)
 } /* ldmud_mapping_init() */
 
 /*-------------------------------------------------------------------------*/
+static Py_hash_t
+ldmud_mapping_hash (ldmud_mapping_t *val)
+
+/* Return a hash of this array.
+ */
+
+{
+    return _Py_HashPointer(val->lpc_mapping);
+} /* ldmud_mapping_hash() */
+
+/*-------------------------------------------------------------------------*/
+static PyObject*
+ldmud_mapping_richcompare (ldmud_mapping_t *self, PyObject *other, int op)
+
+/* Compare <self> to <other> with the compare operation <op>.
+ */
+
+{
+    if (!ldmud_mapping_check(other))
+        Py_RETURN_NOTIMPLEMENTED;
+
+    return pointer_richcompare(self->lpc_mapping, ((ldmud_mapping_t*)other)->lpc_mapping, op);
+} /* ldmud_mapping_richcompare() */
+
+/*-------------------------------------------------------------------------*/
 static PyObject *
 ldmud_mapping_iter (ldmud_mapping_t *self)
 
@@ -7916,7 +7966,7 @@ static ldmud_lpctype_t ldmud_mapping_type =
     0,                                  /* tp_as_number */
     &ldmud_mapping_as_sequence,         /* tp_as_sequence */
     &ldmud_mapping_as_mapping,          /* tp_as_mapping */
-    0,                                  /* tp_hash  */
+    (hashfunc)ldmud_mapping_hash,       /* tp_hash  */
     0,                                  /* tp_call */
     0,                                  /* tp_str */
     0,                                  /* tp_getattro */
@@ -7926,7 +7976,7 @@ static ldmud_lpctype_t ldmud_mapping_type =
     "LPC mapping",                      /* tp_doc */
     0,                                  /* tp_traverse */
     0,                                  /* tp_clear */
-    0,                                  /* tp_richcompare */
+    (richcmpfunc)ldmud_mapping_richcompare, /* tp_richcompare */
     0,                                  /* tp_weaklistoffset */
     (getiterfunc)ldmud_mapping_iter,    /* tp_iter */
     0,                                  /* tp_iternext */
@@ -7979,6 +8029,7 @@ ldmud_mapping_create (mapping_t* map)
 
 /*-------------------------------------------------------------------------*/
 /* Structs */
+static bool ldmud_struct_check(PyObject *ob);
 
 static PyObject*
 ldmud_struct_member_repr (ldmud_struct_and_index_t *self)
@@ -8667,6 +8718,31 @@ ldmud_struct_repr (ldmud_struct_t *self)
 } /* ldmud_struct_repr() */
 
 /*-------------------------------------------------------------------------*/
+static Py_hash_t
+ldmud_struct_hash (ldmud_struct_t *val)
+
+/* Return a hash of this array.
+ */
+
+{
+    return _Py_HashPointer(val->lpc_struct);
+} /* ldmud_struct_hash() */
+
+/*-------------------------------------------------------------------------*/
+static PyObject*
+ldmud_struct_richcompare (ldmud_struct_t *self, PyObject *other, int op)
+
+/* Compare <self> to <other> with the compare operation <op>.
+ */
+
+{
+    if (!ldmud_struct_check(other))
+        Py_RETURN_NOTIMPLEMENTED;
+
+    return pointer_richcompare(self->lpc_struct, ((ldmud_struct_t*)other)->lpc_struct, op);
+} /* ldmud_struct_richcompare() */
+
+/*-------------------------------------------------------------------------*/
 static PyObject *
 ldmud_struct_get_name (ldmud_struct_t *self, void *closure)
 
@@ -8769,7 +8845,7 @@ static ldmud_lpctype_t ldmud_struct_type =
     0,                                  /* tp_as_number */
     0,                                  /* tp_as_sequence */
     0,                                  /* tp_as_mapping */
-    0,                                  /* tp_hash  */
+    (hashfunc)ldmud_struct_hash,        /* tp_hash  */
     0,                                  /* tp_call */
     0,                                  /* tp_str */
     0,                                  /* tp_getattro */
@@ -8779,7 +8855,7 @@ static ldmud_lpctype_t ldmud_struct_type =
     "LPC struct",                       /* tp_doc */
     0,                                  /* tp_traverse */
     0,                                  /* tp_clear */
-    0,                                  /* tp_richcompare */
+    (richcmpfunc)ldmud_struct_richcompare, /* tp_richcompare */
     0,                                  /* tp_weaklistoffset */
     0,                                  /* tp_iter */
     0,                                  /* tp_iternext */
@@ -8796,6 +8872,17 @@ static ldmud_lpctype_t ldmud_struct_type =
     ldmud_struct_new,                   /* tp_new */
 },  ldmud_struct_get_lpctype            /* get_lpctype */
 };
+
+/*-------------------------------------------------------------------------*/
+static bool
+ldmud_struct_check (PyObject *ob)
+
+/* Returns true, when <ob> is of the LPC struct type.
+ */
+
+{
+    return Py_TYPE(ob) == &ldmud_struct_type.type_base;
+} /* ldmud_struct_check() */
 
 /*-------------------------------------------------------------------------*/
 static PyObject*
@@ -10425,6 +10512,42 @@ ldmud_quoted_array_init (ldmud_quoted_array_t *self, PyObject *args, PyObject *k
 } /* ldmud_quoted_array_init() */
 
 /*-------------------------------------------------------------------------*/
+static Py_hash_t
+ldmud_quoted_array_hash (ldmud_quoted_array_t *val)
+
+/* Return a hash of this array.
+ */
+
+{
+    if (val->lpc_quoted_array.type != T_QUOTED_ARRAY)
+        return 0;
+
+    return _Py_HashPointer(val->lpc_quoted_array.u.vec) ^ val->lpc_quoted_array.x.quotes;
+} /* ldmud_quoted_array_hash() */
+
+/*-------------------------------------------------------------------------*/
+static PyObject*
+ldmud_quoted_array_richcompare (ldmud_quoted_array_t *self, PyObject *other, int op)
+
+/* Compare <self> to <other> with the compare operation <op>.
+ */
+
+{
+    vector_t *arr1, *arr2;
+
+    if (!ldmud_quoted_array_check(other))
+        Py_RETURN_NOTIMPLEMENTED;
+
+    arr1 = (self->lpc_quoted_array.type == T_QUOTED_ARRAY) ? self->lpc_quoted_array.u.vec : NULL;
+    arr2 = (((ldmud_quoted_array_t*)other)->lpc_quoted_array.type == T_QUOTED_ARRAY) ? ((ldmud_quoted_array_t*)other)->lpc_quoted_array.u.vec : NULL;
+
+    if (arr1 != arr2 || arr1 == NULL)
+        return pointer_richcompare(arr1, arr2, op);
+    else
+        Py_RETURN_RICHCOMPARE(self->lpc_quoted_array.x.quotes, ((ldmud_quoted_array_t*)other)->lpc_quoted_array.x.quotes, op);
+} /* ldmud_quoted_array_richcompare() */
+
+/*-------------------------------------------------------------------------*/
 static PyObject *
 ldmud_quoted_array_get_array (ldmud_quoted_array_t *val, void *closure)
 
@@ -10496,7 +10619,7 @@ static ldmud_lpctype_t ldmud_quoted_array_type =
     0,                                  /* tp_as_number */
     0,                                  /* tp_as_sequence */
     0,                                  /* tp_as_mapping */
-    0,                                  /* tp_hash  */
+    (hashfunc)ldmud_quoted_array_hash,  /* tp_hash  */
     0,                                  /* tp_call */
     0,                                  /* tp_str */
     0,                                  /* tp_getattro */
@@ -10506,7 +10629,7 @@ static ldmud_lpctype_t ldmud_quoted_array_type =
     "LPC quoted array",                 /* tp_doc */
     0,                                  /* tp_traverse */
     0,                                  /* tp_clear */
-    0,                                  /* tp_richcompare */
+    (richcmpfunc)ldmud_quoted_array_richcompare, /* tp_richcompare */
     0,                                  /* tp_weaklistoffset */
     0,                                  /* tp_iter */
     0,                                  /* tp_iternext */
