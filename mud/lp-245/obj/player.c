@@ -654,6 +654,69 @@ int quit() {
     return 1;
 }
 
+#if __EFUN_DEFINED__(profile_call)
+private void do_trace(closure profilee, mixed *args) {
+  mixed result;
+  profile_result profile = profile_call(&result, profilee, args...);
+
+  string* files = profile.get_files();
+  printf(
+    "profile_call(%Q, %Q) = %Q\n",
+    profilee, args, result);
+
+  for(int i = 0; i < sizeof(files); i++) {
+    string f = files[i];
+    int first = profile.get_first_line(f);
+    int last = profile.get_last_line(f);
+    int count = last - first;
+    int fc = profile.get_file_cost(f);
+    printf(
+      "%dth file: %Q Total eval cost: %d\n",
+      i, f, fc
+    );
+
+    string *lines = explode(read_file(f, first, last-first+1) || "", "\n");
+
+    int wrote_last = 0;
+    for(int l = 0; l < count; l++) {
+      int offset_l = l + first;
+      int time = profile.get_line_time(f, offset_l);
+      int indirect_time = profile.get_line_indirect_time(f, offset_l);
+      int total_time = time + indirect_time;
+      if(!total_time) {
+        if(wrote_last == l-1) {
+          printf("\t...\n");
+        }
+        continue;
+      }
+      printf(
+        "\t[%10d ns] %5d: %s\n",
+        total_time, offset_l, lines[l]);
+      wrote_last = l;
+    }
+  }
+}
+#endif /* efun::profile_call() */
+
+private float fn_under_test(int a) {
+  if(a > 10) {
+    float res;
+    for(int i = 0; i < a; i++) {
+      res = pow(res, i);
+    }
+    return res;
+  } else {
+    return 1.0;
+  }
+}
+
+int trace_test(string arg) {
+#if __EFUN_DEFINED__(profile_call)
+  do_trace(#'fn_under_test, ({ to_int(arg || "0") }));
+#endif
+  return 1;
+}
+
 int kill(string str) {
     object ob;
     if (ghost)
@@ -680,7 +743,13 @@ int kill(string str) {
         write("Yes, yes.\n");
         return 1;
     }
+
+#if __EFUN_DEFINED__(profile_call)
+    do_trace(#'attack_object, ({ ob }));
+#else
     attack_object(ob);
+#endif /* efun::profile_call() */
+
     return 1;
 }
 
@@ -2765,6 +2834,7 @@ static int set_email(string str) {
 }
 
 void add_standard_commands() {
+    add_action("trace_test", "trace_test");
     add_action("set_email", "email");
     add_action("give_object", "give");
     add_action("score", "score");
