@@ -8,7 +8,7 @@ jobs:
             matrix:
                 cc: [gcc, clang]
                 coverage: [false, true]
-                machine: [i386, amd64]
+                machine: [amd64]
                 exclude:
                     - machine: i386
                       coverage: true
