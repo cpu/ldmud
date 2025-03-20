@@ -507,8 +507,13 @@ f_xml_generate (svalue_t *sp)
     return sp;
 }
 
+#if LIBXML_VERSION >= 21200 // 2.12.0+ made xmlErrorPtr const.
+static void
+xml_pkg_error_handler(void * userData, const xmlErrorPtr error)
+#else
 static void
 xml_pkg_error_handler(void * userData, xmlErrorPtr error)
+#endif
 {
     if (error)
     {
