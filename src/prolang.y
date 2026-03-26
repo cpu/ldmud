@@ -1241,8 +1241,9 @@ static bc_offset_t current_break_address;
    *
    * There are a few special values/flags for this variable:
    */
-#define BREAK_ADDRESS_MASK   0x0003ffff
-  /* Mask for the offset-address part of the variable.
+#define BREAK_ADDRESS_MASK     0x000fffff
+  /* Mask for the offset-address part of the variable. It should allow
+   * for a normal program size (FUNSTART_MASK).
    */
 #define BREAK_ON_STACK        (0x04000000)
   /* Bitflag: true when the break-address is stored on the break stack,
@@ -1273,14 +1274,15 @@ static bc_offset_t current_continue_address;
    * also encodes the switch()-nesting depth in the top bits of the
    * variable.
    */
-#define CONTINUE_ADDRESS_MASK   0x0003ffff
-  /* Mask for the offset-address part of the variable.
+#define CONTINUE_ADDRESS_MASK   0x000fffff
+  /* Mask for the offset-address part of the variable. It should allow
+   * for a normal program size (FUNSTART_MASK).
    */
-#define SWITCH_DEPTH_UNIT       0x00040000
+#define SWITCH_DEPTH_UNIT       0x00100000
   /* The switch depth is encoded in multiples of this value.
    * This way we don't have to shift.
    */
-#define SWITCH_DEPTH_MASK       0x3ffc0000
+#define SWITCH_DEPTH_MASK       0x3ff00000
   /* Mask for the switch-nesting depth part of the variable.
    */
 #define CONTINUE_DELIMITER     -0x40000000
@@ -11604,7 +11606,11 @@ statement:
 
           /* In either case, handle the list of continues alike */
           ins_jump_offset(current_continue_address & CONTINUE_ADDRESS_MASK);
-          current_continue_address =
+
+          // We cannot represent offsets larger than CONTINUE_ADDRESS_MASK.
+          // However in this case compilation will fail anyways due to program size.
+          if (CURRENT_PROGRAM_SIZE <= CONTINUE_ADDRESS_MASK)
+              current_continue_address =
                         ( current_continue_address & SWITCH_DEPTH_MASK ) |
                         ( CURRENT_PROGRAM_SIZE - sizeof(int32) );
 
