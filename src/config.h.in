@@ -390,6 +390,18 @@
  */
 @cdef_python_script@ PYTHON_STARTUP_SCRIPT @val_python_script@
 
+/* Define this if you want the LPC sampling profiler for flame graph
+ * generation. This uses SIGVTALRM and ITIMER_VIRTUAL to sample LPC call
+ * stacks at regular intervals.
+ */
+@cdef_use_lpc_profiler@ USE_LPC_PROFILER
+
+/* Maximum number of samples in the profiler ring buffer for 
+ * USE_LPC_PROFILER.
+ * Default: 100000
+ */
+#define LPC_PROFILE_MAX_SAMPLES @val_profile_samples@
+
 /* Define this if you want PCRE instead of traditional regexps.
  */
 @cdef_use_pcre@ USE_PCRE

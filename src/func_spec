@@ -741,6 +741,14 @@ string  json_serialize(mixed);
 mixed   json_parse(string);
 #endif /* USE_JSON */
 
+#ifdef USE_LPC_PROFILER
+
+int     profile_start(string, int);
+void    profile_stop();
+int     profile_is_active();
+
+#endif /* USE_LPC_PROFILER */
+
 /* The following functions are optional and can be configured out.
  */
 

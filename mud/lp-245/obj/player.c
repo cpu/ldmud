@@ -2801,6 +2801,10 @@ void add_standard_commands() {
 #if defined(__TLS__)
     add_action("tls", "tls");
 #endif
+#if __EFUN_DEFINED__(profile_start) 
+    add_action("do_profile_start", "profile_start");
+    add_action("do_profile_stop", "profile_stop");
+#endif
 }
 
 #if defined(__TLS__)
@@ -2819,6 +2823,28 @@ static int tls(string str)
     {
         printf("You are presently connected via an insecure telnet connection.\n");
     }
+    return 1;
+}
+#endif
+
+#if __EFUN_DEFINED__(profile_start) 
+int do_profile_start(string arg) {
+    string filename = "log/lpc_profile.collapsed";
+    int rate = 1000;
+
+    if (profile_start(filename, rate)) {
+        printf("Profiling started at %d Hz.\n", rate);
+        printf("Output will be written to: \"%s\"\n", filename);
+    } else {
+        write("Failed to start profiling (maybe already running?).\n");
+    }
+
+    return 1;
+}
+
+int do_profile_stop(string arg) {
+    profile_stop();
+    write("Profiling stopped. Check log/lpc_profile.collapsed\n");
     return 1;
 }
 #endif
