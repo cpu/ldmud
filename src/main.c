@@ -2024,6 +2024,9 @@ options (void)
 #ifdef USE_JSON
                               , "JSON supported\n"
 #endif
+#ifdef USE_LPC_PROFILER
+                              , "LPC profiler supported\n"
+#endif
 #ifdef USE_TLS
                               , "TLS supported ("
 #  if defined(HAS_OPENSSL)
