@@ -56,27 +56,34 @@
 #include "object.h"
 #include "main.h"
 
-/* A single frame in a captured stack. func_name is normally a stable pointer
- * into a string_t. For lambdas it is NULL and lambda_id holds the funstart
+/* A single frame in a captured stack. Names are inlined (copied at sample
+ * time) so the writer never dereferences pointers into string_t memory
+ * that may have been freed by the time write_collapsed_stacks() runs.
+ * For lambdas, func_name[0] == '\0' and lambda_id holds the funstart
  * pointer's bits; the writer formats it as <lambda:0xHEX>. We can't snprintf
  * in the signal handler, so name formatting is deferred to write-time.
  */
 typedef struct {
-    const char *prog_name;
-    const char *func_name;
+    char        prog_name[LPC_PROFILE_PROG_LEN];
+    char        func_name[LPC_PROFILE_FUNC_LEN];
     uintptr_t   lambda_id;  /* Nonzero iff this frame is a lambda */
 } lpc_profile_frame_t;
 
 /* A single stack sample. Only slots the handler advanced past are live;
- * num_frames > 0 implies a recorded LPC stack.
+ * num_frames > 0 implies a recorded LPC stack. Empty-string buffers (first
+ * byte '\0') mean "absent" for the optional prefixes.
  */
 typedef struct {
     lpc_profile_frame_t frames[LPC_PROFILE_MAX_DEPTH];
     int num_frames;
-    const char *interactive_name;   /* current_interactive->name, or NULL.
-                                       Only set during command dispatch. */
-    const char *root_object_name;   /* Bottom LPC frame's object name, or NULL
-                                       for lightweight objects / no object. */
+    char interactive_name[LPC_PROFILE_INTERACTIVE_LEN];
+                                    /* current_interactive->name basename,
+                                       or empty. Only set during command
+                                       dispatch. */
+    char root_object_name[LPC_PROFILE_ROOT_OBJ_LEN];
+                                    /* Bottom LPC frame's object name, or
+                                       empty for lightweight objects / no
+                                       object / truncated walks. */
 } lpc_profile_sample_t;
 
 /* Ring buffer of samples - pre-allocated for async-signal safety */
@@ -130,6 +137,28 @@ static void write_collapsed_stacks(void);
 static void lpc_profile_signal_handler(int sig);
 static Bool append_segment(char **p, size_t *remaining, const char *fmt, ...);
 
+/* Signal-safe bounded string copy. Copies up to dst_size-1 bytes from src
+ * into dst and always NUL-terminates. Used in the signal handler in place of
+ * pointer-borrowing so the writer never dereferences string_t memory that
+ * may have been freed since sampling.
+ */
+static INLINE void
+safe_strncpy(char *dst, const char *src, size_t dst_size)
+{
+    size_t i = 0;
+    if (dst_size == 0)
+        return;
+    if (src != NULL)
+    {
+        while (i < dst_size - 1 && src[i] != '\0')
+        {
+            dst[i] = src[i];
+            i++;
+        }
+    }
+    dst[i] = '\0';
+} /* safe_strncpy() */
+
 static void
 lpc_profile_signal_handler(int sig)
 /* Signal handler for SIGVTALRM. Called at sample_rate_hz frequency.
@@ -158,13 +187,15 @@ lpc_profile_signal_handler(int sig)
     write_idx = sample_write_idx;
     sample = &samples[write_idx];
     sample->num_frames = 0;
-    sample->interactive_name = NULL;
-    sample->root_object_name = NULL;
+    sample->interactive_name[0] = '\0';
+    sample->root_object_name[0] = '\0';
     frame_idx = 0;
 
     if (current_interactive && current_interactive->name)
     {
-        sample->interactive_name = get_txt(current_interactive->name);
+        safe_strncpy(sample->interactive_name,
+                     get_txt(current_interactive->name),
+                     sizeof(sample->interactive_name));
     }
 
     if (!current_prog || !csp)
@@ -199,7 +230,9 @@ lpc_profile_signal_handler(int sig)
      && stack_bottom->ob.u.ob
      && stack_bottom->ob.u.ob->name)
     {
-        sample->root_object_name = get_txt(stack_bottom->ob.u.ob->name);
+        safe_strncpy(sample->root_object_name,
+                     get_txt(stack_bottom->ob.u.ob->name),
+                     sizeof(sample->root_object_name));
     }
 
     /* On truncation, prepend a synthetic <truncated> frame so the flame
@@ -208,8 +241,10 @@ lpc_profile_signal_handler(int sig)
      */
     if (truncated && frame_idx < LPC_PROFILE_MAX_DEPTH)
     {
-        sample->frames[frame_idx].prog_name = "<truncated>";
-        sample->frames[frame_idx].func_name = "<truncated>";
+        safe_strncpy(sample->frames[frame_idx].prog_name, "<truncated>",
+                     sizeof(sample->frames[frame_idx].prog_name));
+        safe_strncpy(sample->frames[frame_idx].func_name, "<truncated>",
+                     sizeof(sample->frames[frame_idx].func_name));
         sample->frames[frame_idx].lambda_id = 0;
         frame_idx++;
     }
@@ -290,8 +325,18 @@ lpc_profile_signal_handler(int sig)
             func_name = header->name ? get_txt(header->name) : "<unknown>";
         }
 
-        sample->frames[frame_idx].prog_name = prog_name;
-        sample->frames[frame_idx].func_name = func_name;
+        safe_strncpy(sample->frames[frame_idx].prog_name,
+                     prog_name,
+                     sizeof(sample->frames[frame_idx].prog_name));
+        /* Lambda frames have no func name: leave func_name empty so the
+         * writer takes the <lambda:0x...> branch via lambda_id.
+         */
+        if (lambda_id)
+            sample->frames[frame_idx].func_name[0] = '\0';
+        else
+            safe_strncpy(sample->frames[frame_idx].func_name,
+                         func_name,
+                         sizeof(sample->frames[frame_idx].func_name));
         sample->frames[frame_idx].lambda_id = lambda_id;
         frame_idx++;
     }
@@ -573,7 +618,7 @@ write_collapsed_stacks(void)
          *   {root_object}  - object whose extern_call rooted the LPC stack
          *                    (absent for lightweight objects and other edge cases)
          */
-        if (sample->interactive_name)
+        if (sample->interactive_name[0] != '\0')
         {
             const char *name = sample->interactive_name;
             const char *last_slash = strrchr(name, '/');
@@ -583,7 +628,7 @@ write_collapsed_stacks(void)
                 first_segment = MY_FALSE;
         }
 
-        if (sample->root_object_name)
+        if (sample->root_object_name[0] != '\0')
         {
             const char *root = sample->root_object_name;
             if (root[0] == '/')

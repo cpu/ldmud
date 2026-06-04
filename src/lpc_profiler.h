@@ -18,6 +18,15 @@
 /* Maximum length of a single frame string (prog:func) */
 #define LPC_PROFILE_FRAME_LEN 256
 
+/* Per-sample inline name buffers. Names are copied here at sample time so
+ * the writer never dereferences a string_t that may have been freed in the
+ * interim (e.g. when an object is destructed between sampling and write).
+ */
+#define LPC_PROFILE_PROG_LEN        96
+#define LPC_PROFILE_FUNC_LEN        64
+#define LPC_PROFILE_INTERACTIVE_LEN 64
+#define LPC_PROFILE_ROOT_OBJ_LEN   128
+
 extern Bool lpc_profile_start(const char *filename, int sample_rate_hz);
 extern void lpc_profile_stop(void);
 extern Bool lpc_profile_is_active(void);
