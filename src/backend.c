@@ -770,13 +770,6 @@ backend (void)
         mud_is_up = MY_TRUE;
 
 #ifdef USE_LPC_PROFILER
-        /* Drain any LPC profiler samples the signal handler queued since
-         * the last loop iteration, before cleanup_stuff() can run anything
-         * that might destruct the objects those samples refer to. (The
-         * samples carry inline-buffer copies of names, so this is not
-         * a use-after-free guard — it's about keeping the producer ring
-         * shallow so it doesn't overflow.)
-         */
         lpc_profile_drain();
 #endif
 

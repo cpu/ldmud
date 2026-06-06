@@ -32,6 +32,7 @@ src/util/indent/Makefile
 src/util/indent/indent
 src/util/xerq/Makefile
 src/util/xerq/erq
+src/test/test_lpc_profile_agg
 test/log/*
 test/*.log
 *.pyc

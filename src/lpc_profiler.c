@@ -1,33 +1,22 @@
 /*---------------------------------------------------------------------------
- * LPC Profiler - Sampling profiler for generating flame graphs
+ * LPC Profiler - sampling profiler for generating flame graphs.
  *
- * This module implements a sampling profiler that captures LPC call stacks
- * via SIGVTALRM signals and outputs collapsed stack format suitable for
- * flame graph visualization (using tools like flamegraph.pl).
+ *---------------------------------------------------------------------------
+ * A SIGVTALRM handler captures the LPC call stack into a SPSC producer
+ * ring. The backend loop drains the ring into an aggregator (see
+ * lpc_profile_agg.c) that counts samples per unique stack. On stop, the
+ * aggregator writes collapsed-stacks format suitable for flamegraph.pl.
  *
- * We use ITIMER_VIRTUAL / SIGVTALRM rather than ITIMER_PROF / SIGPROF
- * because the driver itself uses SIGPROF for slow-evaluation detection
- * (handle_profiling_signal in interpret.c). 
- *
- * ITIMER_VIRTUAL counts user-mode CPU only (not kernel time), which for an LPC
- * profiler is fine since interpreter cycles are user-mode. I/O-heavy efuns may
- * be slightly undersampled.
- *
- * The profiler is async-signal-safe: the signal handler only reads existing
- * data structures and writes to pre-allocated buffers. Each sample captures:
- *   - The LPC call stack (program + function or efun/sefun/lambda name)
- *   - The object that rooted the stack (heartbeat/callout/command receiver)
- *   - current_interactive, if set (e.g. during command dispatch)
- *
- * Samples land in a fixed-size ring buffer and once full, oldest samples are
- * overwritten so the final output reflects the most recent activity.
+ * SIGVTALRM (not SIGPROF) is used because the driver itself uses SIGPROF
+ * for slow-evaluation detection (handle_profiling_signal in interpret.c).
+ * ITIMER_VIRTUAL fires on user-mode CPU only, so I/O-heavy efuns may be
+ * undersampled.
  *
  * Usage from LPC:
- *   profile_start("/log/profile.collapsed", 1000);  // 1000 Hz sampling
+ *   profile_start("/log/profile.collapsed", 1000);  // 1000 Hz
  *   ... run workload ...
  *   profile_stop();
- *   // Check status: profile_is_active() returns 1 if running
- *   // Then: flamegraph.pl profile.collapsed > profile.svg
+ *   // flamegraph.pl profile.collapsed > profile.svg
  *---------------------------------------------------------------------------
  */
 
@@ -58,69 +47,27 @@
 #include "object.h"
 #include "main.h"
 
-/* A single frame in a captured stack. Names are inlined (copied at sample
- * time) so the writer never dereferences pointers into string_t memory
- * that may have been freed by the time write_collapsed_stacks() runs.
- * For lambdas, func_name[0] == '\0' and lambda_id holds the funstart
- * pointer's bits; the writer formats it as <lambda:0xHEX>. We can't snprintf
- * in the signal handler, so name formatting is deferred to write-time.
+/* Names are copied inline so the drain never dereferences pointers into
+ * string_t memory that may have been freed in the meantime. Lambda frames
+ * leave func_name empty; the formatter uses lambda_id instead.
  */
 typedef struct {
     char        prog_name[LPC_PROFILE_PROG_LEN];
     char        func_name[LPC_PROFILE_FUNC_LEN];
-    uintptr_t   lambda_id;  /* Nonzero iff this frame is a lambda */
+    uintptr_t   lambda_id;
 } lpc_profile_frame_t;
 
-/* A single stack sample. Only slots the handler advanced past are live;
- * num_frames > 0 implies a recorded LPC stack. Empty-string buffers (first
- * byte '\0') mean "absent" for the optional prefixes.
- */
 typedef struct {
     lpc_profile_frame_t frames[LPC_PROFILE_MAX_DEPTH];
     int num_frames;
     char interactive_name[LPC_PROFILE_INTERACTIVE_LEN];
-                                    /* current_interactive->name basename,
-                                       or empty. Only set during command
-                                       dispatch. */
     char root_object_name[LPC_PROFILE_ROOT_OBJ_LEN];
-                                    /* Bottom LPC frame's object name, or
-                                       empty for lightweight objects / no
-                                       object / truncated walks. */
 } lpc_profile_sample_t;
 
-/* Aggregating consumer.
- *
- * Phase B replaces the session-long raw-sample ring with an aggregator:
- * each drained sample is converted into its collapsed-format bytes,
- * looked up in the hashmap, and either bumps an existing entry's count
- * or inserts a new one. Storage grows with the count of *unique* stacks,
- * not the total number of samples.
- *
- * Owned for the lifetime of one profiling session: allocated in
- * lpc_profile_start, drained into during the session, freed in
- * lpc_profile_stop after the output is written.
- */
-static lpc_profile_agg_t *agg = NULL;
-
-/* Counter for samples we tried to aggregate but couldn't due to allocation
- * failure inside lpc_profile_agg_insert. These are distinct from
- * producer_dropped (which is a handler-side overflow). Reported alongside
- * the rest of the diagnostics at stop time.
- */
-static int agg_dropped = 0;
-
-/* Producer ring (SPSC) between the signal handler and the drain.
- *
- * Single-producer (signal handler) / single-consumer (lpc_profile_drain
- * on the backend thread). Indices use volatile sig_atomic_t; the producer
- * writes slot bytes before bumping the tail and the consumer reads the
- * tail before slot bytes. Single-threaded interpreter + signal-handler
- * semantics make this sufficient: the handler can interrupt the drain,
- * but the drain only ever reads slots strictly before the tail it
- * observed at entry, and the handler only ever writes the slot at the
- * current tail.
- *
- * Capacity must be a power of two so the modulo reduces to a mask.
+/* SPSC producer ring between the signal handler (producer) and the
+ * drain on the backend thread (consumer). Indices are volatile so the
+ * handler and the drain agree on the publish/consume order. Capacity
+ * must be a power of two so the modulo reduces to a mask.
  */
 #define LPC_PROFILE_PRODUCER_RING 256
 #if (LPC_PROFILE_PRODUCER_RING & (LPC_PROFILE_PRODUCER_RING - 1)) != 0
@@ -129,61 +76,50 @@ static int agg_dropped = 0;
 #define LPC_PROFILE_PRODUCER_MASK (LPC_PROFILE_PRODUCER_RING - 1)
 
 static lpc_profile_sample_t producer_ring[LPC_PROFILE_PRODUCER_RING];
-static volatile sig_atomic_t producer_head = 0;  /* next slot the drain reads */
-static volatile sig_atomic_t producer_tail = 0;  /* next slot the handler writes */
+static volatile sig_atomic_t producer_head = 0;  /* drain reads here */
+static volatile sig_atomic_t producer_tail = 0;  /* handler writes here */
 
-/* Producer-ring drop counter. Incremented when the handler finds the
- * producer ring full (consumer drain hasn't kept up). This is a *new*
- * failure mode introduced by the SPSC handoff and is reported separately
- * from the consumer ring's pre-existing wrap-on-overflow behavior. A
- * non-zero value means the producer ring is too small for the sample
- * rate / workload and the profile has gaps that aren't just consumer-ring
- * wraps.
+/* Incremented when the handler finds the producer ring full and has to
+ * drop a sample. Distinct from agg_dropped, which counts allocation
+ * failures inside the aggregator during drain.
  */
 static volatile sig_atomic_t producer_dropped = 0;
+static int agg_dropped = 0;
 
-/* Profiler state */
 static volatile sig_atomic_t profiler_active = 0;
 
-/* Diagnostic counters, printed at lpc_profile_stop(). Only read after
- * sigaction has uninstalled the handler, which is a synchronization point
- * with the kernel, so we don't require volatile here.
- *   stat_total_signals:  every SIGVTALRM delivery while active
- *   stat_skipped_no_lpc: signals that arrived with no LPC frame on the stack
- *   stat_recorded:       samples actually written into the ring (may wrap)
+/* Allocated by lpc_profile_start, freed by lpc_profile_stop. */
+static lpc_profile_agg_t *agg = NULL;
+
+/* Counters. Written only by the handler while profiler_active; read after
+ * sigaction restores the previous handler, which serializes against the
+ * kernel, so no atomic access is needed.
  */
 static int stat_total_signals = 0;
 static int stat_skipped_no_lpc = 0;
 static int stat_recorded = 0;
 
-/* Wall-clock and user-CPU baselines, for samples/sec reporting. We only
- * track ru_utime since ITIMER_VIRTUAL fires on user-mode time, so the
- * "expected signals" math must compare against user time alone.
+/* Baselines for the user-CPU rate report. Only ru_utime matters since
+ * ITIMER_VIRTUAL fires on user time only.
  */
 static struct timeval profile_start_time;
 static struct rusage profile_start_rusage;
 static int profile_start_rusage_ok = 0;
 
-/* Output filename (full path, mudlib + caller-supplied path) */
 static char output_filename[MAXPATHLEN];
-
-/* Sample rate in Hz */
 static int profile_sample_rate = 1000;
 
-/* Previous SIGVTALRM handler (to restore when stopping) */
 static struct sigaction prev_sigvtalrm_action;
 static Bool prev_handler_saved = MY_FALSE;
 
 static void write_collapsed_stacks(void);
 static void lpc_profile_signal_handler(int sig);
 
-/* Signal-safe bounded string copy. Copies up to dst_size-1 bytes from src
- * into dst and always NUL-terminates. Used in the signal handler in place of
- * pointer-borrowing so the writer never dereferences string_t memory that
- * may have been freed since sampling.
+/* Signal-safe bounded string copy. Copies up to dst_size-1 bytes and
+ * always NUL-terminates.
  */
 static INLINE void
-safe_strncpy(char *dst, const char *src, size_t dst_size)
+safe_strncpy (char *dst, const char *src, size_t dst_size)
 {
     size_t i = 0;
     if (dst_size == 0)
@@ -200,13 +136,12 @@ safe_strncpy(char *dst, const char *src, size_t dst_size)
 } /* safe_strncpy() */
 
 static void
-lpc_profile_signal_handler(int sig)
-/* Signal handler for SIGVTALRM. Called at sample_rate_hz frequency.
- * This function must be async-signal-safe!
+lpc_profile_signal_handler (int sig)
+
+/* SIGVTALRM handler. Must be async-signal-safe.
  *
- * Writes one slot into the SPSC producer ring; the drain on the backend
- * thread feeds the slot into the aggregator later. If the producer ring
- * is full, the sample is dropped and producer_dropped is incremented.
+ * Writes one slot into the producer ring and bumps the tail. If the ring
+ * is full, increments producer_dropped and returns without publishing.
  */
 {
     struct control_stack *p;
@@ -224,22 +159,15 @@ lpc_profile_signal_handler(int sig)
 
     stat_total_signals++;
 
-    /* Claim the next producer slot. Reading head before writing the slot
-     * is required for SPSC correctness: the consumer advances head only
-     * after fully consuming a slot, so if head != next_tail we own the
-     * slot exclusively until we bump tail at the end.
-     */
     tail = producer_tail;
     head = producer_head;
     next_tail = (tail + 1) & LPC_PROFILE_PRODUCER_MASK;
     if (next_tail == head)
     {
-        /* Producer ring full — drain hasn't kept up. Drop this sample. */
         producer_dropped++;
         return;
     }
     sample = &producer_ring[tail];
-    sample->num_frames = 0;
     sample->interactive_name[0] = '\0';
     sample->root_object_name[0] = '\0';
     frame_idx = 0;
@@ -253,16 +181,14 @@ lpc_profile_signal_handler(int sig)
 
     if (!current_prog || !csp)
     {
-        /* No active program, not executing LPC code */
         stat_skipped_no_lpc++;
         return;
     }
 
-    /* Find the bottom of the control stack by walking backwards from csp
-     * until we hit the terminator entry (prog == NULL), bounded by MAX_TRACE.
-     * If we hit the bound without finding the terminator, the stack is
-     * deeper than MAX_TRACE; in that case stack_bottom is arbitrary and we
-     * must not trust its .ob for root-object attribution.
+    /* Walk back from csp to the terminator entry (prog == NULL), bounded
+     * by MAX_TRACE. A walk that hits the bound without finding the
+     * terminator is truncated; stack_bottom is arbitrary in that case and
+     * its .ob must not be trusted for root-object attribution.
      */
     stack_bottom = csp;
     for (depth = 0; depth < MAX_TRACE && stack_bottom->prog != NULL; depth++)
@@ -272,11 +198,9 @@ lpc_profile_signal_handler(int sig)
     truncated = (depth == MAX_TRACE && stack_bottom->prog != NULL);
     stack_bottom++;
 
-    /* Capture the object that rooted this LPC stack (the receiver of the
-     * apply/heartbeat/call_out/command that got us into LPC). The bottom
-     * frame is always an extern_call, so its .ob is meaningful. Lightweight
-     * objects have no .name field, so we only attribute T_OBJECT roots.
-     * Skipped on truncated walks since stack_bottom isn't really the bottom.
+    /* The bottom frame is the extern_call that rooted the LPC stack
+     * (heartbeat/callout/command receiver). Lightweight objects carry no
+     * .name, so only T_OBJECT roots are attributed.
      */
     if (!truncated
      && stack_bottom->ob.type == T_OBJECT
@@ -288,10 +212,6 @@ lpc_profile_signal_handler(int sig)
                      sizeof(sample->root_object_name));
     }
 
-    /* On truncation, prepend a synthetic <truncated> frame so the flame
-     * graph clearly shows these samples don't share a real root with
-     * non-truncated ones.
-     */
     if (truncated && frame_idx < LPC_PROFILE_MAX_DEPTH)
     {
         safe_strncpy(sample->frames[frame_idx].prog_name, "<truncated>",
@@ -302,7 +222,6 @@ lpc_profile_signal_handler(int sig)
         frame_idx++;
     }
 
-    /* Walk the control stack from bottom to top (oldest to newest call) */
     for (p = stack_bottom; p <= csp && frame_idx < LPC_PROFILE_MAX_DEPTH; p++)
     {
         program_t *prog;
@@ -327,13 +246,9 @@ lpc_profile_signal_handler(int sig)
 
         prog_name = prog->name ? get_txt(prog->name) : "<unknown>";
 
-        /* Handle special function markers. The funstart magic values mark
-         * synthetic frames pushed for closure calls; the real identity of
-         * the call is in p->instruction (an opcode for efun closures, or an
-         * index into simul_efun_table for sefun closures).
-         *
-         * Mirrors collect_trace() in interpret.c and pkg-python.c, which is
-         * the authoritative stringification used by error traces.
+        /* Special-funstart handling mirrors collect_trace() in
+         * interpret.c / pkg-python.c. For closure calls the real identity
+         * is in p->instruction.
          */
         if (funstart == SIMUL_EFUN_FUNSTART)
         {
@@ -362,18 +277,14 @@ lpc_profile_signal_handler(int sig)
 #endif
         else if (funstart < prog->program || funstart > PROGRAM_END(*prog))
         {
-            /* For a Lambda closure funstart points outside program. We can't
-             * recover a name easily, but the funstart address uniquely
-             * identifies the lambda within this profiling session; the writer
-             * will format it as <lambda:0xHEX>. We avoid that formatting here
-             * to remain signal-safe.
+            /* Lambda closure: funstart points outside the program. Use it
+             * as a session-unique id; the formatter renders <lambda:0xHEX>.
              */
             lambda_id = (uintptr_t)funstart;
             func_name = NULL;
         }
         else
         {
-            /* Normal LPC function */
             function_t *header = &prog->function_headers[FUNCTION_HEADER_INDEX(funstart)];
             func_name = header->name ? get_txt(header->name) : "<unknown>";
         }
@@ -381,9 +292,6 @@ lpc_profile_signal_handler(int sig)
         safe_strncpy(sample->frames[frame_idx].prog_name,
                      prog_name,
                      sizeof(sample->frames[frame_idx].prog_name));
-        /* Lambda frames have no func name: leave func_name empty so the
-         * writer takes the <lambda:0x...> branch via lambda_id.
-         */
         if (lambda_id)
             sample->frames[frame_idx].func_name[0] = '\0';
         else
@@ -394,10 +302,8 @@ lpc_profile_signal_handler(int sig)
         frame_idx++;
     }
 
-    /* If every frame in the walk was skipped (e.g. SIGVTALRM hit during
-     * call setup when csp->funstart is still NULL), we have no real sample
-     * to commit. Treat it like the no-LPC bailout: don't advance, don't
-     * count as recorded.
+    /* SIGVTALRM can hit mid-call-setup when every walked frame is skipped.
+     * Don't publish; the kernel will deliver another signal soon.
      */
     if (frame_idx == 0)
     {
@@ -406,31 +312,17 @@ lpc_profile_signal_handler(int sig)
     }
 
     sample->num_frames = frame_idx;
-
-    /* Publish the slot: bump the producer tail. The consumer reads the
-     * tail before slot bytes, so once it observes the new tail value the
-     * slot contents written above are visible.
-     */
     producer_tail = next_tail;
     stat_recorded++;
 } /* lpc_profile_signal_handler() */
 
 void
-lpc_profile_drain(void)
-/* Drain pending producer-ring slots and feed them into the aggregator.
- *
- * Called from the top of the backend loop and once from lpc_profile_stop()
- * before output is written. Runs on the backend thread; SIGVTALRM is not
- * masked here. The handler may interrupt this function and write to the
- * slot at producer_tail, but it never writes to a slot in [head, tail)
- * (where tail is the value we sampled at entry), so reading those slots
- * is race-free.
- *
- * Each slot's frame metadata is reshaped into the aggregator's frame
- * struct (a thin view over the slot's inline string buffers) and handed
- * to lpc_profile_agg_insert, which formats the collapsed-stack bytes,
- * looks them up, and either inserts a new entry or bumps an existing
- * one's count.
+lpc_profile_drain (void)
+
+/* Feed any pending producer-ring slots into the aggregator. Runs on the
+ * backend thread; SIGVTALRM is not masked. The handler can interrupt
+ * mid-drain and write to producer_tail's slot, but it never touches
+ * slots in [head, tail), so reads here are race-free.
  */
 {
     sig_atomic_t tail, head;
@@ -438,9 +330,6 @@ lpc_profile_drain(void)
     if (!agg)
         return;
 
-    /* Snapshot tail once; any slots the handler publishes after this
-     * point will be picked up by the next drain.
-     */
     tail = producer_tail;
     head = producer_head;
 
@@ -454,9 +343,8 @@ lpc_profile_drain(void)
 
         if (src->interactive_name[0] != '\0')
         {
-            const char *name = src->interactive_name;
-            const char *last_slash = strrchr(name, '/');
-            interactive_basename = last_slash ? last_slash + 1 : name;
+            const char *last_slash = strrchr(src->interactive_name, '/');
+            interactive_basename = last_slash ? last_slash + 1 : src->interactive_name;
         }
         if (src->root_object_name[0] != '\0')
             root_object_name = src->root_object_name;
@@ -468,11 +356,8 @@ lpc_profile_drain(void)
             agg_frames[j].lambda_id = src->frames[j].lambda_id;
         }
 
-        if (!lpc_profile_agg_insert(agg,
-                                    interactive_basename,
-                                    root_object_name,
-                                    agg_frames,
-                                    (size_t)src->num_frames))
+        if (!lpc_profile_agg_insert(agg, interactive_basename, root_object_name,
+                                    agg_frames, (size_t)src->num_frames))
         {
             agg_dropped++;
         }
@@ -480,18 +365,17 @@ lpc_profile_drain(void)
         head = (head + 1) & LPC_PROFILE_PRODUCER_MASK;
     }
 
-    /* Publish the new head only after consuming the slots, so the handler
-     * doesn't reclaim a slot we haven't finished copying.
+    /* Publish the new head only after consuming, so the handler doesn't
+     * reclaim a slot we haven't finished reading.
      */
     producer_head = head;
 } /* lpc_profile_drain() */
 
 Bool
-lpc_profile_start(const char *filename, int sample_rate_hz)
-/* Start the profiler.
- * filename: path to output file (relative to mudlib directory)
- * sample_rate_hz: sampling frequency (e.g., 1000 = 1000 samples/sec = 1ms)
- * Returns: true on success
+lpc_profile_start (const char *filename, int sample_rate_hz)
+
+/* filename: relative to the mudlib directory.
+ * sample_rate_hz: must be in [1, 10000].
  */
 {
     struct sigaction sa;
@@ -503,19 +387,17 @@ lpc_profile_start(const char *filename, int sample_rate_hz)
         debug_message("%s LPC profiler already active\n", time_stamp());
         return MY_FALSE;
     }
-
     if (!filename)
     {
         debug_message("%s LPC profiler: invalid filename\n", time_stamp());
         return MY_FALSE;
     }
-
     if (sample_rate_hz <= 0 || sample_rate_hz > 10000)
     {
-        debug_message("%s LPC profiler: sample rate must be 1-10000 Hz\n", time_stamp());
+        debug_message("%s LPC profiler: sample rate must be 1-10000 Hz\n",
+                      time_stamp());
         return MY_FALSE;
     }
-
     if (!mud_lib)
     {
         debug_message("%s LPC profiler: no mud_lib directory configured.\n",
@@ -527,15 +409,6 @@ lpc_profile_start(const char *filename, int sample_rate_hz)
     output_filename[sizeof(output_filename) - 1] = '\0';
     profile_sample_rate = sample_rate_hz;
 
-    /* Allocate a fresh aggregator. Any previous session's storage is
-     * already freed in lpc_profile_stop, but defensively free here so a
-     * crashed previous session can't leak.
-     */
-    if (agg)
-    {
-        lpc_profile_agg_free(agg);
-        agg = NULL;
-    }
     agg = lpc_profile_agg_new();
     if (!agg)
     {
@@ -544,11 +417,6 @@ lpc_profile_start(const char *filename, int sample_rate_hz)
         return MY_FALSE;
     }
 
-    /* Reset producer ring + diagnostics. The producer ring is reset before
-     * profiler_active is set so the handler can't observe stale head/tail
-     * values.
-     */
-    memset(producer_ring, 0, sizeof(producer_ring));
     producer_head = 0;
     producer_tail = 0;
     producer_dropped = 0;
@@ -559,7 +427,6 @@ lpc_profile_start(const char *filename, int sample_rate_hz)
     gettimeofday(&profile_start_time, NULL);
     profile_start_rusage_ok = (getrusage(RUSAGE_SELF, &profile_start_rusage) == 0);
 
-    /* Install our SIGVTALRM handler */
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = lpc_profile_signal_handler;
     sigemptyset(&sa.sa_mask);
@@ -575,10 +442,7 @@ lpc_profile_start(const char *filename, int sample_rate_hz)
     }
     prev_handler_saved = MY_TRUE;
 
-    /* Calculate interval in microseconds */
     interval_usec = 1000000 / sample_rate_hz;
-
-    /* Start the profiling timer */
     timer.it_interval.tv_sec = 0;
     timer.it_interval.tv_usec = interval_usec;
     timer.it_value.tv_sec = 0;
@@ -588,7 +452,6 @@ lpc_profile_start(const char *filename, int sample_rate_hz)
     {
         debug_message("%s LPC profiler: failed to start timer: %s\n",
                       time_stamp(), strerror(errno));
-        /* Restore previous handler */
         sigaction(SIGVTALRM, &prev_sigvtalrm_action, NULL);
         prev_handler_saved = MY_FALSE;
         lpc_profile_agg_free(agg);
@@ -599,15 +462,18 @@ lpc_profile_start(const char *filename, int sample_rate_hz)
     profiler_active = 1;
     debug_message("%s LPC profiler started: output=%s, rate=%d Hz\n",
                   time_stamp(), output_filename, sample_rate_hz);
-
     return MY_TRUE;
 } /* lpc_profile_start() */
 
 void
-lpc_profile_stop(void)
-/* Stop the profiler and write the output file. */
+lpc_profile_stop (void)
 {
     struct itimerval timer;
+    struct timeval now;
+    struct rusage ru;
+    double wall_sec = 0.0;
+    double user_cpu_sec = 0.0;
+    int expected;
 
     if (!profiler_active)
     {
@@ -615,70 +481,48 @@ lpc_profile_stop(void)
         return;
     }
 
-    /* Order matters: clear the active flag first so any signal already
-     * pending (queued by the kernel before we disarm the timer) hits the
-     * early-out in the handler instead of writing a stray sample.
+    /* Clear the active flag before disarming the timer so any pending
+     * SIGVTALRM hits the handler's early-out instead of writing a stray
+     * sample.
      */
     profiler_active = 0;
 
     memset(&timer, 0, sizeof(timer));
     setitimer(ITIMER_VIRTUAL, &timer, NULL);
 
-    /* Restore previous signal handler */
     if (prev_handler_saved)
     {
         sigaction(SIGVTALRM, &prev_sigvtalrm_action, NULL);
         prev_handler_saved = MY_FALSE;
     }
 
-    /* Drain any producer-ring slots the backend loop didn't pick up yet.
-     * After the signal handler is uninstalled there's no more producer, so
-     * this is the final, race-free drain.
-     */
+    /* Final drain after the handler is uninstalled — race-free. */
     lpc_profile_drain();
 
+    gettimeofday(&now, NULL);
+    wall_sec = (now.tv_sec - profile_start_time.tv_sec)
+             + (now.tv_usec - profile_start_time.tv_usec) / 1.0e6;
+    if (profile_start_rusage_ok && getrusage(RUSAGE_SELF, &ru) == 0)
     {
-        struct timeval now;
-        struct rusage ru;
-        double wall_sec = 0.0;
-        double user_cpu_sec = 0.0;
-        int signals = stat_total_signals;
-        int skipped = stat_skipped_no_lpc;
-        int recorded = stat_recorded;
-        int expected;
-
-        /* Subtract in integer form before converting to double, so we don't
-         * lose precision to large absolute timestamps. We only use ru_utime
-         * (not ru_stime) because ITIMER_VIRTUAL fires on user time only
-         */
-        gettimeofday(&now, NULL);
-        wall_sec = (now.tv_sec - profile_start_time.tv_sec)
-                 + (now.tv_usec - profile_start_time.tv_usec) / 1.0e6;
-
-        if (profile_start_rusage_ok && getrusage(RUSAGE_SELF, &ru) == 0)
-        {
-            long sec  = ru.ru_utime.tv_sec  - profile_start_rusage.ru_utime.tv_sec;
-            long usec = ru.ru_utime.tv_usec - profile_start_rusage.ru_utime.tv_usec;
-            user_cpu_sec = sec + usec / 1.0e6;
-        }
-
-        expected = (int)(user_cpu_sec * profile_sample_rate);
-
-        debug_message("%s LPC profiler stopped: wall=%.2fs, "
-                      "user CPU during profile=%.2fs (%.1f%% busy)\n",
-                      time_stamp(), wall_sec, user_cpu_sec,
-                      wall_sec > 0 ? (100.0 * user_cpu_sec / wall_sec) : 0.0);
-        debug_message("%s LPC profiler: signals=%d (expected ~%d at %d Hz "
-                      "for that user CPU time), skipped_no_lpc=%d "
-                      "(%.1f%% of signals), recorded=%d, "
-                      "producer_ring_dropped=%d, agg_dropped=%d, "
-                      "unique_stacks=%zu\n",
-                      time_stamp(), signals, expected, profile_sample_rate,
-                      skipped,
-                      signals > 0 ? (100.0 * skipped / signals) : 0.0,
-                      recorded, (int)producer_dropped, agg_dropped,
-                      lpc_profile_agg_unique_stacks(agg));
+        long sec  = ru.ru_utime.tv_sec  - profile_start_rusage.ru_utime.tv_sec;
+        long usec = ru.ru_utime.tv_usec - profile_start_rusage.ru_utime.tv_usec;
+        user_cpu_sec = sec + usec / 1.0e6;
     }
+    expected = (int)(user_cpu_sec * profile_sample_rate);
+
+    debug_message("%s LPC profiler stopped: wall=%.2fs, "
+                  "user CPU during profile=%.2fs (%.1f%% busy)\n",
+                  time_stamp(), wall_sec, user_cpu_sec,
+                  wall_sec > 0 ? (100.0 * user_cpu_sec / wall_sec) : 0.0);
+    debug_message("%s LPC profiler: signals=%d (expected ~%d at %d Hz), "
+                  "skipped_no_lpc=%d (%.1f%%), recorded=%d, "
+                  "producer_ring_dropped=%d, agg_dropped=%d, unique_stacks=%zu\n",
+                  time_stamp(), stat_total_signals, expected, profile_sample_rate,
+                  stat_skipped_no_lpc,
+                  stat_total_signals > 0
+                    ? (100.0 * stat_skipped_no_lpc / stat_total_signals) : 0.0,
+                  stat_recorded, (int)producer_dropped, agg_dropped,
+                  lpc_profile_agg_unique_stacks(agg));
 
     write_collapsed_stacks();
 
@@ -692,31 +536,64 @@ lpc_profile_is_active(void)
     return profiler_active ? MY_TRUE : MY_FALSE;
 }
 
+static Bool
+write_header_line (int fd, const char *fmt, ...)
+
+/* snprintf+write one line to fd. Returns MY_FALSE on write error, leaving
+ * errno set; the body write will hit the same error and report it.
+ * Truncation of the formatted line is treated as success (line dropped).
+ */
+{
+    char buf[128];
+    va_list ap;
+    int n;
+    ssize_t w;
+    size_t left;
+    const char *p;
+
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n <= 0 || (size_t)n >= sizeof(buf))
+        return MY_TRUE;
+
+    p = buf;
+    left = (size_t)n;
+    while (left)
+    {
+        w = write(fd, p, left);
+        if (w < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            return MY_FALSE;
+        }
+        if (w == 0)
+        {
+            errno = EIO;
+            return MY_FALSE;
+        }
+        p += w;
+        left -= (size_t)w;
+    }
+    return MY_TRUE;
+} /* write_header_line() */
+
 static void
-write_collapsed_stacks(void)
-/* Write the aggregated collapsed-stack output to output_filename.
- *
- * Output line format (for flamegraph.pl):
+write_collapsed_stacks (void)
+
+/* Output line format (one per unique stack):
  *   [interactive]{root_object};prog1:func1;prog2:func2;... count
- *
- * Both prefixes are optional. Phase B aggregates: one line per *unique*
- * stack with its sample count, in insertion order (deterministic for a
- * given input stream). flamegraph.pl does not care about ordering.
- *
- * Note: program/object/function names are not escaped. Any ';' or
- * whitespace inside a name would confuse flamegraph.pl's parser. LPC
- * names are normally safe (paths and #clone-ids), so we don't sanitize.
+ * Both prefixes are optional. Names are not escaped: a ';' or whitespace
+ * inside one would confuse flamegraph.pl, but LPC names (paths and
+ * #clone-ids) are normally safe.
  */
 {
     int fd;
     ssize_t bytes;
 
     if (!agg)
-    {
-        debug_message("%s LPC profiler: no aggregator at write time\n",
-                      time_stamp());
         return;
-    }
 
     fd = open(output_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
@@ -726,28 +603,12 @@ write_collapsed_stacks(void)
         return;
     }
 
-    /* Report producer-ring drops up-front so a downstream reader sees the
-     * gap even if it never parses past the header. Only emitted when
-     * nonzero so a clean run produces a comment-free file.
-     */
     if (producer_dropped > 0)
-    {
-        char buf[128];
-        int n = snprintf(buf, sizeof(buf),
-                         "# dropped %d samples: producer ring full\n",
-                         (int)producer_dropped);
-        if (n > 0 && (size_t)n < sizeof(buf))
-            (void)!write(fd, buf, (size_t)n);
-    }
+        write_header_line(fd, "# dropped %d samples: producer ring full\n",
+                          (int)producer_dropped);
     if (agg_dropped > 0)
-    {
-        char buf[128];
-        int n = snprintf(buf, sizeof(buf),
-                         "# dropped %d samples: aggregator allocation failure\n",
-                         agg_dropped);
-        if (n > 0 && (size_t)n < sizeof(buf))
-            (void)!write(fd, buf, (size_t)n);
-    }
+        write_header_line(fd, "# dropped %d samples: aggregator allocation failure\n",
+                          agg_dropped);
 
     bytes = lpc_profile_agg_write(agg, fd);
     if (bytes < 0)
@@ -757,7 +618,6 @@ write_collapsed_stacks(void)
         close(fd);
         return;
     }
-
     if (close(fd) < 0)
     {
         debug_message("%s LPC profiler: close error on %s: %s\n",
@@ -767,7 +627,7 @@ write_collapsed_stacks(void)
 
     debug_message("%s LPC profiler: wrote %zu unique stacks (%zd bytes) to %s\n",
                   time_stamp(), lpc_profile_agg_unique_stacks(agg),
-                  (ssize_t)bytes, output_filename);
+                  bytes, output_filename);
 } /* write_collapsed_stacks() */
 
 svalue_t *

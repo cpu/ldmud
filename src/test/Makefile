@@ -1,14 +1,6 @@
 # Standalone unit tests for the LPC profiler aggregator.
-#
-# These tests build against src/lpc_profile_agg.c directly, with the
-# LPC_PROFILE_AGG_STANDALONE_TEST macro defined so the module's allocator
-# and hash hooks fall back to libc instead of the driver's xalloc + hashmem32.
-# Nothing here depends on the rest of the driver build — invoke as:
-#
-#     make -C src/test test-agg
-#
-# ASan+UBSan are on by default so use-after-free, off-by-one resize, and
-# uninitialised-memory bugs surface immediately.
+# Run as:  make -C src/test test-agg
+# ASan + UBSan are on by default.
 
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g -O1

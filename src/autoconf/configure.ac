@@ -239,7 +239,6 @@ AC_MY_ARG_ENABLE(use-gcrypt,yes,,[Enables support for libgcrypt])
 AC_MY_ARG_ENABLE(use-python,no,,[Enables Python extension])
 AC_MY_ARG_WITH(python-script,startup.py,,[Startup python script])
 AC_MY_ARG_ENABLE(use-lpc-profiler,no,,[Enables LPC sampling profiler for flame graphs])
-AC_MY_ARG_WITH(profile-samples,100000,,[Max samples in profiler ring buffer])
 AC_MY_ARG_ENABLE(use-parse-command,yes,,[Enables efun parse_command()])
 AC_MY_ARG_ENABLE(use-process-string,yes,,[Enables efun process_string()])
 AC_MY_ARG_ENABLE(comm-stat,yes,,[Enable statistics for outgoing packets])
@@ -637,7 +636,6 @@ AC_INT_VAL_FROM_WITH(pcre_recursion_limit)
 AC_INT_VAL_FROM_WITH(max_net_connects)
 AC_INT_VAL_FROM_WITH(random_period_length)
 AC_INT_VAL_FROM_WITH(valgrind_redzone)
-AC_INT_VAL_FROM_WITH(profile_samples)
 
 if test "x$cdef_access_control" = "x#undef"; then
   cdef_access_log="#undef"
@@ -2708,7 +2706,6 @@ AC_SUBST(val_tls_crldirectory)
 AC_SUBST(val_tls_password)
 AC_SUBST(val_python_script)
 AC_SUBST(val_valgrind_redzone)
-AC_SUBST(val_profile_samples)
 
 dnl finally: some remaining stuff
 dnl

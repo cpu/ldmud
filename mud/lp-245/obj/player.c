@@ -487,6 +487,7 @@ static void wiz_commands2() {
     add_action("cd", "cd");
 }
 
+#if __EFUN_DEFINED__(profile_start)
 static int profile_cmd(string arg) {
     string sub;
     int rate;
@@ -526,6 +527,7 @@ static int profile_cmd(string arg) {
     write("Usage: profile start [rate_hz] | stop | status\n");
     return 1;
 }
+#endif
 
 static void wiz_commands() {
     if (this_object() != this_player())
@@ -2806,7 +2808,9 @@ static int set_email(string str) {
 
 void add_standard_commands() {
     add_action("set_email", "email");
+#if __EFUN_DEFINED__(profile_start)
     add_action("profile_cmd", "profile");
+#endif
     add_action("give_object", "give");
     add_action("score", "score");
     add_action("save_character", "save");
