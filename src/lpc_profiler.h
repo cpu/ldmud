@@ -31,6 +31,13 @@ extern Bool lpc_profile_start(const char *filename, int sample_rate_hz);
 extern void lpc_profile_stop(void);
 extern Bool lpc_profile_is_active(void);
 
+/* Drain pending producer-ring slots into the consumer samples[] ring.
+ * Cheap, no allocation, must run on the backend thread (not the signal
+ * handler). Called from the top of the backend loop and once from
+ * lpc_profile_stop() before output is written.
+ */
+extern void lpc_profile_drain(void);
+
 extern svalue_t *f_profile_start(svalue_t *sp);
 extern svalue_t *f_profile_stop(svalue_t *sp);
 extern svalue_t *f_profile_is_active(svalue_t *sp);

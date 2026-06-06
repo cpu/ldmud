@@ -487,6 +487,46 @@ static void wiz_commands2() {
     add_action("cd", "cd");
 }
 
+static int profile_cmd(string arg) {
+    string sub;
+    int rate;
+
+    if (!arg) arg = "status";
+    if (sscanf(arg, "start %d", rate) == 1) {
+        sub = "start";
+    } else if (sscanf(arg, "%s %d", sub, rate) != 2) {
+        sub = arg;
+        rate = 1000;
+    }
+
+    if (sub == "start") {
+        if (profile_is_active()) {
+            write("Profiler already running.\n");
+            return 1;
+        }
+        if (profile_start("/log/lpc_profile.collapsed", rate))
+            write("Profiler started at " + rate + " Hz, writing /log/lpc_profile.collapsed.\n");
+        else
+            write("Failed to start profiler (see debug log).\n");
+        return 1;
+    }
+    if (sub == "stop") {
+        if (!profile_is_active()) {
+            write("Profiler not running.\n");
+            return 1;
+        }
+        profile_stop();
+        write("Profiler stopped; output in /log/lpc_profile.collapsed.\n");
+        return 1;
+    }
+    if (sub == "status") {
+        write("Profiler is " + (profile_is_active() ? "running" : "stopped") + ".\n");
+        return 1;
+    }
+    write("Usage: profile start [rate_hz] | stop | status\n");
+    return 1;
+}
+
 static void wiz_commands() {
     if (this_object() != this_player())
         return;
@@ -2766,6 +2806,7 @@ static int set_email(string str) {
 
 void add_standard_commands() {
     add_action("set_email", "email");
+    add_action("profile_cmd", "profile");
     add_action("give_object", "give");
     add_action("score", "score");
     add_action("save_character", "save");

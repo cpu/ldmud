@@ -76,6 +76,10 @@
 #include "i-current_object.h"
 #include "i-eval_cost.h"
 
+#ifdef USE_LPC_PROFILER
+#  include "lpc_profiler.h"
+#endif
+
 #include "../mudlib/sys/configuration.h"
 #include "../mudlib/sys/driver_hook.h"
 #include "../mudlib/sys/debug_message.h"
@@ -764,6 +768,17 @@ backend (void)
 #endif
 
         mud_is_up = MY_TRUE;
+
+#ifdef USE_LPC_PROFILER
+        /* Drain any LPC profiler samples the signal handler queued since
+         * the last loop iteration, before cleanup_stuff() can run anything
+         * that might destruct the objects those samples refer to. (The
+         * samples carry inline-buffer copies of names, so this is not
+         * a use-after-free guard — it's about keeping the producer ring
+         * shallow so it doesn't overflow.)
+         */
+        lpc_profile_drain();
+#endif
 
         /* Replace programs, remove destructed objects, and similar stuff */
         cleanup_stuff();

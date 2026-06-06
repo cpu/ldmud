@@ -86,20 +86,64 @@ typedef struct {
                                        object / truncated walks. */
 } lpc_profile_sample_t;
 
-/* Ring buffer of samples - pre-allocated for async-signal safety */
+/* Consumer ring buffer of samples.
+ *
+ * Phase A architectural split: the signal handler no longer writes here
+ * directly. Instead it writes into the producer ring (below) and the
+ * drain (lpc_profile_drain, called from the backend loop) copies slots
+ * from the producer ring into this consumer ring. The wrap-on-overflow
+ * semantics of this ring are unchanged from the pre-split code: oldest
+ * sample is overwritten once sample_count saturates at the cap.
+ */
 static lpc_profile_sample_t samples[LPC_PROFILE_MAX_SAMPLES];
 
-/* Write index for new samples.
+/* Write index for new samples in the consumer ring.
  * Always advances modulo LPC_PROFILE_MAX_SAMPLES; old samples are overwritten.
+ * Only written by the drain (backend thread); the signal handler does not
+ * touch it.
  */
-static volatile sig_atomic_t sample_write_idx = 0;
+static sig_atomic_t sample_write_idx = 0;
 
-/* Count of samples ever written, saturated at LPC_PROFILE_MAX_SAMPLES.
- * Once this reaches the cap the ring has wrapped and the oldest live sample
- * is at sample_write_idx; below the cap, live samples are [0, sample_count).
- * The saturation is what keeps the wrap detection sound across long sessions.
+/* Count of samples ever written to the consumer ring, saturated at
+ * LPC_PROFILE_MAX_SAMPLES. Once this reaches the cap the ring has wrapped
+ * and the oldest live sample is at sample_write_idx; below the cap, live
+ * samples are [0, sample_count). The saturation is what keeps the wrap
+ * detection sound across long sessions.
  */
-static volatile sig_atomic_t sample_count = 0;
+static sig_atomic_t sample_count = 0;
+
+/* Producer ring (SPSC) between the signal handler and the drain.
+ *
+ * Single-producer (signal handler) / single-consumer (lpc_profile_drain
+ * on the backend thread). Indices use volatile sig_atomic_t; the producer
+ * writes slot bytes before bumping the tail and the consumer reads the
+ * tail before slot bytes. Single-threaded interpreter + signal-handler
+ * semantics make this sufficient: the handler can interrupt the drain,
+ * but the drain only ever reads slots strictly before the tail it
+ * observed at entry, and the handler only ever writes the slot at the
+ * current tail.
+ *
+ * Capacity must be a power of two so the modulo reduces to a mask.
+ */
+#define LPC_PROFILE_PRODUCER_RING 256
+#if (LPC_PROFILE_PRODUCER_RING & (LPC_PROFILE_PRODUCER_RING - 1)) != 0
+#  error "LPC_PROFILE_PRODUCER_RING must be a power of two"
+#endif
+#define LPC_PROFILE_PRODUCER_MASK (LPC_PROFILE_PRODUCER_RING - 1)
+
+static lpc_profile_sample_t producer_ring[LPC_PROFILE_PRODUCER_RING];
+static volatile sig_atomic_t producer_head = 0;  /* next slot the drain reads */
+static volatile sig_atomic_t producer_tail = 0;  /* next slot the handler writes */
+
+/* Producer-ring drop counter. Incremented when the handler finds the
+ * producer ring full (consumer drain hasn't kept up). This is a *new*
+ * failure mode introduced by the SPSC handoff and is reported separately
+ * from the consumer ring's pre-existing wrap-on-overflow behavior. A
+ * non-zero value means the producer ring is too small for the sample
+ * rate / workload and the profile has gaps that aren't just consumer-ring
+ * wraps.
+ */
+static volatile sig_atomic_t producer_dropped = 0;
 
 /* Profiler state */
 static volatile sig_atomic_t profiler_active = 0;
@@ -163,13 +207,18 @@ static void
 lpc_profile_signal_handler(int sig)
 /* Signal handler for SIGVTALRM. Called at sample_rate_hz frequency.
  * This function must be async-signal-safe!
+ *
+ * Writes one slot into the SPSC producer ring; the drain on the backend
+ * thread copies the slot into the consumer samples[] ring later. If the
+ * producer ring is full, the sample is dropped and producer_dropped is
+ * incremented.
  */
 {
     struct control_stack *p;
     struct control_stack *stack_bottom;
     lpc_profile_sample_t *sample;
     int frame_idx;
-    int write_idx;
+    sig_atomic_t head, tail, next_tail;
     int depth;
     Bool truncated;
 
@@ -180,12 +229,21 @@ lpc_profile_signal_handler(int sig)
 
     stat_total_signals++;
 
-    /* Claim the next slot. SIGVTALRM is masked while this handler runs
-     * so the load+store of sample_write_idx below has no other writer to race
-     * with. Once the ring fills, we overwrite the oldest sample.
+    /* Claim the next producer slot. Reading head before writing the slot
+     * is required for SPSC correctness: the consumer advances head only
+     * after fully consuming a slot, so if head != next_tail we own the
+     * slot exclusively until we bump tail at the end.
      */
-    write_idx = sample_write_idx;
-    sample = &samples[write_idx];
+    tail = producer_tail;
+    head = producer_head;
+    next_tail = (tail + 1) & LPC_PROFILE_PRODUCER_MASK;
+    if (next_tail == head)
+    {
+        /* Producer ring full — drain hasn't kept up. Drop this sample. */
+        producer_dropped++;
+        return;
+    }
+    sample = &producer_ring[tail];
     sample->num_frames = 0;
     sample->interactive_name[0] = '\0';
     sample->root_object_name[0] = '\0';
@@ -354,15 +412,53 @@ lpc_profile_signal_handler(int sig)
 
     sample->num_frames = frame_idx;
 
-    /* Commit the sample: advance write index (mod buffer size) and bump the
-     * saturated count. The count saturating at the cap is what tells the
-     * writer "we have wrapped, so the oldest live sample is at write_idx."
+    /* Publish the slot: bump the producer tail. The consumer reads the
+     * tail before slot bytes, so once it observes the new tail value the
+     * slot contents written above are visible.
      */
-    sample_write_idx = (write_idx + 1) % LPC_PROFILE_MAX_SAMPLES;
-    if (sample_count < LPC_PROFILE_MAX_SAMPLES)
-        sample_count++;
+    producer_tail = next_tail;
     stat_recorded++;
 } /* lpc_profile_signal_handler() */
+
+void
+lpc_profile_drain(void)
+/* Drain pending producer-ring slots into the consumer samples[] ring.
+ *
+ * Called from the top of the backend loop and once from lpc_profile_stop()
+ * before output is written. Runs on the backend thread; SIGVTALRM is not
+ * masked here. The handler may interrupt this function and write to the
+ * slot at producer_tail, but it never writes to a slot in [head, tail)
+ * (where tail is the value we sampled at entry), so reading those slots
+ * is race-free.
+ */
+{
+    sig_atomic_t tail, head;
+
+    /* Snapshot tail once; any slots the handler publishes after this
+     * point will be picked up by the next drain.
+     */
+    tail = producer_tail;
+    head = producer_head;
+
+    while (head != tail)
+    {
+        lpc_profile_sample_t *src = &producer_ring[head];
+        lpc_profile_sample_t *dst = &samples[sample_write_idx];
+
+        *dst = *src;
+
+        sample_write_idx = (sample_write_idx + 1) % LPC_PROFILE_MAX_SAMPLES;
+        if (sample_count < LPC_PROFILE_MAX_SAMPLES)
+            sample_count++;
+
+        head = (head + 1) & LPC_PROFILE_PRODUCER_MASK;
+    }
+
+    /* Publish the new head only after consuming the slots, so the handler
+     * doesn't reclaim a slot we haven't finished copying.
+     */
+    producer_head = head;
+} /* lpc_profile_drain() */
 
 Bool
 lpc_profile_start(const char *filename, int sample_rate_hz)
@@ -405,10 +501,17 @@ lpc_profile_start(const char *filename, int sample_rate_hz)
     output_filename[sizeof(output_filename) - 1] = '\0';
     profile_sample_rate = sample_rate_hz;
 
-    /* Clear the sample buffer */
+    /* Clear the sample buffers and reset both ring indices. The producer
+     * ring is reset before profiler_active is set so the handler can't
+     * observe stale head/tail values.
+     */
     memset(samples, 0, sizeof(samples));
+    memset(producer_ring, 0, sizeof(producer_ring));
     sample_write_idx = 0;
     sample_count = 0;
+    producer_head = 0;
+    producer_tail = 0;
+    producer_dropped = 0;
     stat_total_signals = 0;
     stat_skipped_no_lpc = 0;
     stat_recorded = 0;
@@ -483,6 +586,12 @@ lpc_profile_stop(void)
         prev_handler_saved = MY_FALSE;
     }
 
+    /* Drain any producer-ring slots the backend loop didn't pick up yet.
+     * After the signal handler is uninstalled there's no more producer, so
+     * this is the final, race-free drain.
+     */
+    lpc_profile_drain();
+
     {
         struct timeval now;
         struct rusage ru;
@@ -516,11 +625,12 @@ lpc_profile_stop(void)
                       wall_sec > 0 ? (100.0 * user_cpu_sec / wall_sec) : 0.0);
         debug_message("%s LPC profiler: signals=%d (expected ~%d at %d Hz "
                       "for that user CPU time), skipped_no_lpc=%d "
-                      "(%.1f%% of signals), recorded=%d\n",
+                      "(%.1f%% of signals), recorded=%d, "
+                      "producer_ring_dropped=%d\n",
                       time_stamp(), signals, expected, profile_sample_rate,
                       skipped,
                       signals > 0 ? (100.0 * skipped / signals) : 0.0,
-                      recorded);
+                      recorded, (int)producer_dropped);
     }
 
     write_collapsed_stacks();
@@ -585,6 +695,18 @@ write_collapsed_stacks(void)
         debug_message("%s LPC profiler: failed to open output file %s: %s\n",
                       time_stamp(), output_filename, strerror(errno));
         return;
+    }
+
+    /* Report producer-ring drops up-front so a downstream reader sees the
+     * gap even if it never parses past the header. Only emitted when nonzero
+     * so a clean run produces a comment-free file (preserving byte-for-byte
+     * equivalence with HEAD when the ring never overflowed). The consumer-
+     * ring's pre-existing wrap-on-overflow behavior is not reported here.
+     */
+    if (producer_dropped > 0)
+    {
+        fprintf(fp, "# dropped %d samples: producer ring full\n",
+                (int)producer_dropped);
     }
 
     /* If we wrapped, the oldest live sample is at sample_write_idx and there
