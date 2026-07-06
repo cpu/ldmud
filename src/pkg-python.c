@@ -10501,7 +10501,7 @@ ldmud_efun_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *kwds)
 
         if (!idx)
         {
-            PyErr_Format(PyExc_NameError, "unknown efun '%s'", get_txt(efun_name));
+            PyErr_Format(PyExc_NameError, "unknown efun '%U'", name);
             return -1;
         }
     }
@@ -10711,7 +10711,7 @@ ldmud_simul_efun_closure_init (ldmud_closure_t *self, PyObject *args, PyObject *
 
     if (!idx)
     {
-        PyErr_Format(PyExc_NameError, "unknown simul-efun '%s'", get_txt(sefun_name));
+        PyErr_Format(PyExc_NameError, "unknown simul-efun '%U'", name);
         return -1;
     }
 

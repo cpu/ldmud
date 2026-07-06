@@ -699,6 +699,14 @@ class TestClosure(unittest.TestCase):
             self.assertEqual(c(10, "A", "B", "C"), 3)
             ldmud.efuns.destruct(ob)
 
+    def testInvalidEfun(self):
+        with self.assertRaises(NameError):
+            ldmud.EfunClosure(self.master, "doesntexist")
+
+    def testInvalidSimulEfun(self):
+        with self.assertRaises(NameError):
+            ldmud.SimulEfunClosure(self.master, "doesntexist")
+
 class TestLfunClosure(unittest.TestCase):
     def setUp(self):
         self.master = ldmud.get_master()
