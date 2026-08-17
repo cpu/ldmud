@@ -81,6 +81,10 @@ struct coroutine_s
     int num_variables;              /* Number of local variables.     */
     int num_values;                 /* Number of extra values.        */
     int num_variable_names;         /* Number of variable names.      */
+    int num_break_addrs;            /* Number of entries on the break
+                                     * stack (which lives within the
+                                     * local variables).
+                                     */
 #ifdef DEBUG
     int num_hidden_variables;       /* Number of hidden temporary
                                      * variables (eg. in a foreach.
