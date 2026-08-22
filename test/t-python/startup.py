@@ -2021,9 +2021,15 @@ ldmud.register_efun("unregister_abs", lambda: ldmud.unregister_efun("abs"))
 
 # Test of the hooks
 num_hb = 0
+external_coroutine_result = None
 def hb_hook():
-    global num_hb
+    global num_hb, external_coroutine_result
     num_hb += 1
+
+    if external_coroutine_result is None:
+        # Exercise coroutine resumption with no active LPC frame.
+        cr = ldmud.LWObject("/testob").functions.test_switch_coroutine()
+        external_coroutine_result = cr() == 0 and cr(1) == 42 and not cr
 
 ob_list = []
 def ob_created(ob):
@@ -2033,7 +2039,7 @@ def ob_destroyed(ob):
     ob_list.remove(ob)
 
 def get_hook_info():
-    return ldmud.Array((num_hb, ldmud.Array(ob_list),))
+    return ldmud.Array((num_hb, ldmud.Array(ob_list), external_coroutine_result))
 
 last_progname = None
 last_filename = None
